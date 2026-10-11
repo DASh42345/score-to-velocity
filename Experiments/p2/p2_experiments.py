@@ -13,6 +13,8 @@
     python p2_experiments.py loglik VE         # ~4 мин
     python p2_experiments.py loglik VP
     python p2_experiments.py hutch VP          # ~2 мин
+    python p2_experiments.py prior VE          # ~1 мин
+    python p2_experiments.py prior VP
 
 Чтобы пересчитать что-то заново, удалите соответствующий файл в results/ или checkpoints/.
 """
@@ -47,12 +49,36 @@ os.makedirs('checkpoints', exist_ok=True)
 os.makedirs('figures', exist_ok=True)
 
 
+def _pack(obj):
+    """numpy-массивы -> тензоры с меткой: такой файл читается через torch.load(weights_only=True)."""
+    if isinstance(obj, np.ndarray):
+        return {'__numpy__': torch.from_numpy(obj)}
+    if isinstance(obj, dict):
+        return {k: _pack(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_pack(v) for v in obj]
+    return obj
+
+
+def _unpack(obj):
+    if isinstance(obj, dict):
+        if set(obj) == {'__numpy__'}:
+            return obj['__numpy__'].numpy()
+        return {k: _unpack(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_unpack(v) for v in obj]
+    return obj
+
+
 def load_or_run(path, fn, *args):
-    """Загрузить результат из файла или посчитать и сохранить."""
+    """Загрузить результат из файла или посчитать и сохранить.
+
+    weights_only=True: из файла читаются только тензоры и простые типы, без произвольного pickle.
+    """
     if os.path.exists(path):
-        return torch.load(path, weights_only=False)
+        return _unpack(torch.load(path, weights_only=True))
     res = fn(*args)
-    torch.save(res, path)
+    torch.save(_pack(res), path)
     return res
 
 
@@ -155,6 +181,25 @@ def loglik(name):
     return res
 
 
+def oracle_loglik_error(name, steps_list=(1000, 4000)):
+    """Откуда ошибка log p при точном score: схема Эйлера или приор вместо настоящего p_T.
+
+    Для каждого числа шагов — MAE до истинного log p_eps с приором SDE и с точным p_T смеси.
+    Ошибка схемы падает с числом шагов, ошибка приора — нет.
+    """
+    sde = SDES[name]
+    x = test_points(name)
+    te, tT = torch.tensor(EPS), torch.tensor(sde.T)
+    true = mix.log_prob_t(x, sde.alpha(te), sde.std(te))
+    exact_pT = lambda xT: mix.log_prob_t(xT, sde.alpha(tT), sde.std(tT))
+    out = {'steps': list(steps_list), 'prior': [], 'exact_pT': []}
+    for steps in steps_list:
+        for key, prior_logp in [('prior', None), ('exact_pT', exact_pT)]:
+            est = pf_ode_loglik(sde, oracle_score(sde), x, steps, EPS, prior_logp=prior_logp)
+            out[key].append((est - true).abs().mean().item())
+    return out
+
+
 def hutchinson_vs_k(name, n_pts=500, steps=400, Ks=(1, 4, 16, 64)):
     """Разброс оценки Хатчинсона при усреднении по K векторам Радемахера."""
     sde = SDES[name]
@@ -180,3 +225,5 @@ if __name__ == '__main__':
         load_or_run(f'results/loglik_{name}.pt', loglik, name)
     elif stage == 'hutch':
         load_or_run(f'results/hutch_{name}.pt', hutchinson_vs_k, name)
+    elif stage == 'prior':
+        load_or_run(f'results/oracle_prior_{name}.pt', oracle_loglik_error, name)

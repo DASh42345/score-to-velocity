@@ -51,7 +51,8 @@ def _div_hutchinson(F, x, v):
     return (vjp * v).sum(1)
 
 
-def pf_ode_loglik(sde, score_fn, x0, n_steps=1000, eps=1e-3, method="exact", generator=None):
+def pf_ode_loglik(sde, score_fn, x0, n_steps=1000, eps=1e-3, method="exact", generator=None,
+                  prior_logp=None):
     """log p_eps(x0) через probability flow ODE (Song et al., приложение D.2).
 
     Интегрируем ODE dx = F(x, t) dt вперёд от eps до T и одновременно
@@ -62,6 +63,9 @@ def pf_ode_loglik(sde, score_fn, x0, n_steps=1000, eps=1e-3, method="exact", gen
              "hutchinson"   — оценка Хатчинсона с одним вектором Радемахера на точку,
                               фиксированным вдоль всей траектории (так делается на практике).
     Шаг интегрирования — метод Эйлера, F и div F вычисляются в одной и той же точке.
+
+    prior_logp — плотность, которой заменяем log p_T; по умолчанию приор SDE. У VE приор
+    N(0, s_max^2 I) заметно отличается от настоящего p_T, и это даёт вклад в ошибку log p.
     """
     ts = time_grid(sde, n_steps, eps, reverse=False)
     x = x0.clone()
@@ -82,4 +86,4 @@ def pf_ode_loglik(sde, score_fn, x0, n_steps=1000, eps=1e-3, method="exact", gen
         F = (sde.f(x, t) + F_score).detach()
         integral += div * dt
         x = x + F * dt
-    return sde.prior_logp(x) + integral
+    return (prior_logp or sde.prior_logp)(x) + integral
